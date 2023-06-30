@@ -118,8 +118,8 @@ class Device {
     }
 
     /* Find 'set' topic by instance*/
-    findTopicByInstance(instance) {
-        return this.data.custom_data.mqtt.find(i => i.instance === instance).set;
+    findTopicsByInstance(type, instance) {
+        return this.data.custom_data.mqtt.filter(i => i.type === type && i.instance === instance);
     }
     
     /* Get mapped value (if exist) for capability type */
@@ -129,9 +129,11 @@ class Device {
      * @param {*} actType capability type
      * @param {*} y2m mapping direction (yandex to mqtt, mqtt to yandex)
      */
-    getMappedValue(val, actType, y2m) {
-        const map = this.data.custom_data.valueMapping.find(m => m.type == actType);
-        if (map == undefined) return val;
+    getMappedValue(val, actType, y2m, instance) {
+        const map = this.data.custom_data.valueMapping.find(m => m.type == actType && m.instance == instance);
+        if (map == undefined) {
+            return val;
+        }
         
         var from, to;
         if (y2m == true) [from, to] = map.mapping;
@@ -173,27 +175,38 @@ class Device {
     }
 
     /* Change device capability state and publish value to MQTT topic */
-    setCapabilityState(val, type, instance) {
+    setCapabilityState(val, type, instance, relative = false) {
+
+        if(relative==undefined) relative=false;
+
         const {id} = this.data;
         const actType = String(type).split('.')[2];
-        const value = this.getMappedValue(val, actType, true);
+        const value = this.getMappedValue(val, actType, true, instance);
 
         let message;
-        let topic;
+        let topics;
         try {
             const capability = this.findCapability(type, instance);
             if (capability == undefined) throw new Error(`Can't find capability '${type}' in device '${id}'`);
-            capability.state.value = value;
-            topic = this.findTopicByInstance(instance);
-            if (topic == undefined) throw new Error(`Can't find set topic for '${type}' in device '${id}'`);
-            message = `${value}`;
+            capability.state.value = relative ? capability.state.value + value : value;
+            
+            topics = this.findTopicsByInstance(type, instance);
+            if(topics.length == 0) throw new Error(`Can't find set topic for '${type}' in device '${id}'`);
+            
+            message = `${capability.state.value}`;
+
+            this.updateState(capability.state.value, instance)
+
         } catch(e) {              
-            topic = false;
+            topics.length=0;
             logger.log('error', {message: `${e}`});
         }
 
-        if (topic) {
-            global.mqttClient.publish(topic, message);
+        if (topics.length>0) {
+            topics.forEach((topic) => {
+                global.mqttClient.publish(topic.set, message);
+                global.logger.log('info', {message: `value ${message} sending to ${topic.set} of ${instance} (relative is ${relative})`})
+            })            
         }
 
         return {
@@ -212,12 +225,17 @@ class Device {
         const {id, capabilities, properties} = this.data;
 
         try {
-            const cp = [].concat(capabilities, properties).find(cp => (cp.state.instance === instance));
-            if (cp == undefined) throw new Error(`Can't instance '${instance}' in device '${id}'`);
+            const cp = [].concat(capabilities, properties).filter(cp => (cp.state.instance === instance));
+            if (cp.length == 0) throw new Error(`Can't find instance '${instance}' in device '${id}'`);
 
-            const actType = String(cp.type).split('.')[2];
-            const value = this.getMappedValue(val, actType, false);
-            cp.state = {instance, value: convertToYandexValue(value, actType)};
+            cp.forEach((vl, ind, arr)=>{
+
+                let actType = String(vl.type).split('.')[2];
+                let value = this.getMappedValue(val, actType, false);
+                vl.state = {instance, value: convertToYandexValue(value, actType)};
+
+            })
+
         } catch(e) {
             logger.log('error', {message: `${e}`});
         }
